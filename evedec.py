@@ -14,7 +14,7 @@ store_path = ..\
 '''
 
 #function executed by each decompile process
-def process_func(code_q, result_q, store_path, lock):
+def process_func(code_q, result_q, store_path):
     okay_files = failed_files = 0
     try:
         import sys, os, marshal, errno, Queue
@@ -45,15 +45,13 @@ def process_func(code_q, result_q, store_path, lock):
             except KeyboardInterrupt:
                 raise
             except:
-                with lock:
-                    print '### Can\'t decompile %s' % filename
-                    sys.stdout.flush()
+                print '### Can\'t decompile %s' % filename
+                sys.stdout.flush()
                 os.rename(filename, filename+'_failed')
                 failed_files += 1
             else:
-                with lock:
-                    print '+++ Okay decompiling %s' % filename
-                    sys.stdout.flush()
+                print '+++ Okay decompiling %s' % filename
+                sys.stdout.flush()
                 okay_files += 1
                 
     except Queue.Empty: #timeout reached
@@ -68,14 +66,15 @@ if __name__ == '__main__':
     if sys.version[:3] != '2.7':
         print >>sys.stderr, '!!! Wrong Python version : %s.  Python 2.7 required.'
         sys.exit(-1)
-    import os, cPickle, imp, zipfile, zlib, traceback
-    from Queue import Empty
-    from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
+    import os, cPickle, imp, zipfile, zlib, traceback, shutil
+    from Queue import Empty, Queue    
+    #from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
     from datetime import datetime
     from ConfigParser import ConfigParser
-    from ctypes import windll, c_void_p, c_int, create_string_buffer, byref
+    from binascii import unhexlify as unhex, hexlify
+    from Crypto.Cipher import DES3
 
-    freeze_support()
+    #freeze_support()
     
     startTime = datetime.now() #time this cpu hog
     
@@ -94,6 +93,9 @@ if __name__ == '__main__':
 
     #search blue.dll for keyblob header
     #yeah, it's really that easy
+    
+    #dest = os.path.join(store_path,'__binaries')
+    #destination = shutil.copytree(eve_path, dest)
 
     blue_path = os.path.join(eve_path, 'bin/blue.dll')
     blue = open(blue_path, 'rb').read()
@@ -125,8 +127,8 @@ if __name__ == '__main__':
 
     #set up crypt api
     #need a context before we can import key
-    hProv = c_void_p()
-    windll.advapi32.CryptAcquireContextA(byref(hProv), 0, 'Microsoft Enhanced Cryptographic Provider v1.0', 1, 0xf0000000)
+    #hProv = c_void_p()
+    #res = windll.advapi32.CryptAcquireContextA(byref(hProv), 0, 'Microsoft Enhanced Cryptographic Provider v1.0', 1, 0xf0000000)
 
     keys = []
     for keyloc in keylocs:
@@ -137,9 +139,9 @@ if __name__ == '__main__':
         keyblob += blue[keyloc:keyloc+24][::-1] #reverse key byte order when converting from simpleblob to plaintextkeyblob
         
         #import the keyblob and get the key handle
-        hKey = c_void_p()
-        windll.advapi32.CryptImportKey(hProv, keyblob, len(keyblob), 0, 0, byref(hKey))
-        keys.append((hKey, blue[keyloc-len(blob_header):keyloc+24], keyblob))
+        #hKey = c_void_p()
+        #windll.advapi32.CryptImportKey(hProv, keyblob, len(keyblob), 0, 0, byref(hKey))
+        keys.append((0, blue[keyloc-len(blob_header):keyloc+24], keyblob))
 
     for key in keys:
         simple, plain = key[1], key[2]
@@ -166,16 +168,23 @@ if __name__ == '__main__':
               plain[8:12][::-1].encode('hex'),
               plain[12:].encode('hex'))
         print
+        
+    
 
-    CryptDecrypt = windll.advapi32.CryptDecrypt
+    #CryptDecrypt = windll.advapi32.CryptDecrypt
 
     def UnjumbleString(s):
         try:
-            bData = create_string_buffer(s)
-            bDataLen = c_int(len(s))
-            CryptDecrypt(keys[0][0], 0, True, 0, bData, byref(bDataLen))
-            dec_s = bData.raw[:bDataLen.value] #decrypted string may be shorter, but not longer
-            return zlib.decompress(dec_s)
+            #bData = create_string_buffer(s)
+            #bDataLen = c_int(len(s)
+            #CryptDecrypt(keys[0][0], 0, True, 0, bData, byref(bDataLen))
+            #dec_s = bData.raw[:bDataLen.value] #decrypted string may be shorter, but not longer
+            #decr = DES3.new(unhex("ba64b0087ac48920529183d3572f806bae5715375bb59185"), DES3.MODE_CBC, unhex("0000000000000000"))
+            key = hexlify(keys[0][2][12:])
+            #print("Key: " + key)
+            decr = DES3.new(unhex(key), DES3.MODE_CBC, unhex("0000000000000000"))
+            d = decr.decrypt(s)
+            return zlib.decompress(d)
         except zlib.error:
             print 'Key failed. Attempting key switch.'
             del keys[0]
@@ -184,47 +193,59 @@ if __name__ == '__main__':
                 sys.exit(-1)
             return UnjumbleString(s)
             
-    
     #queue of marshalled code objects
     code_queue = Queue()
     #queue of process results
     result_queue = Queue()
-    
+    sys.stdout.flush()
+            
+    #queue of marshalled code objects
+    code_queue = Queue()
+    #queue of process results
+    result_queue = Queue()
     sys.stdout.flush()
         
     try:
         #create decompile processes
-        procs = []
-        print_lock = Lock()
-        for i in range(cpu_count()-1): #save one process for decompressing/decrypting
-            procs.append(Process(target=process_func,
-                                 args=(code_queue, result_queue, store_path, print_lock)));
+        #procs = []
+        #print_lock = Lock()
+        #for i in range(cpu_count()-1): #save one process for decompressing/decrypting
+        #    procs.append(Process(target=process_func,
+        #                         args=(code_queue, result_queue, store_path, print_lock)));
             
         #start procs now; they will block on empty queue
-        for p in procs:
-            p.start()
+        #for p in procs:
+        #    p.start()
             
         with zipfile.ZipFile(os.path.join(eve_path, 'code.ccp'), 'r') as zf:
             for filename in zf.namelist():
+                print (filename)
                 if filename[-4:] == '.pyj':
                     code_queue.put( (filename[:-1], UnjumbleString(zf.read(filename))[8:]) )
                 elif filename[-4:] == '.pyc':
                     code_queue.put( (filename[:-1], zf.read(filename)[8:]) )
 
         #this process is done except for waiting, so add one more decompile process
-        p = Process(target=process_func,
-                    args=(code_queue, result_queue, store_path, print_lock))
-        p.start()
-        procs.append(p)
+        #p = Process(target=process_func,
+        #            args=(code_queue, result_queue, store_path, print_lock))
+        #p.start()
+        #procs.append(p)
         
         #add sentinel values to indicate end of queue
-        for p in procs:
-            code_queue.put( (None, None) )
+        #for p in procs:
+        code_queue.put( (None, None) )
 
         #wait for decompile processes to finish
-        for p in procs:
-            p.join() #join() will block until p is finished
+        #for p in procs:
+        #    p.join() #join() will block until p is finished
+        
+        #(code_q, result_q, store_path, lock):
+        #for job in iter(code_queue.get, None):
+        process_func(code_queue,result_queue,store_path)
+        
         #pull results from the result queue
+        
+        
         okay_files = failed_files = 0
         try:
             while 1: #will terminate when queue.get() generates Empty exception
