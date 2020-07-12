@@ -14,7 +14,7 @@ store_path = ..\
 '''
 
 #function executed by each decompile process
-def process_func(code_q, result_q, store_path):
+def process_func(code_q, result_q, store_path, lock):
     okay_files = failed_files = 0
     try:
         import sys, os, marshal, errno, Queue
@@ -45,13 +45,15 @@ def process_func(code_q, result_q, store_path):
             except KeyboardInterrupt:
                 raise
             except:
-                print '### Can\'t decompile %s' % filename
-                sys.stdout.flush()
+                with lock:
+                    print '### Can\'t decompile %s' % filename
+                    sys.stdout.flush()
                 os.rename(filename, filename+'_failed')
                 failed_files += 1
             else:
-                print '+++ Okay decompiling %s' % filename
-                sys.stdout.flush()
+                with lock:
+                    print '+++ Okay decompiling %s' % filename
+                    sys.stdout.flush()
                 okay_files += 1
                 
     except Queue.Empty: #timeout reached
@@ -68,13 +70,13 @@ if __name__ == '__main__':
         sys.exit(-1)
     import os, cPickle, imp, zipfile, zlib, traceback, shutil
     from Queue import Empty, Queue    
-    #from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
+    from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
     from datetime import datetime
     from ConfigParser import ConfigParser
     from binascii import unhexlify as unhex, hexlify
     from Crypto.Cipher import DES3
 
-    #freeze_support()
+    freeze_support()
     
     startTime = datetime.now() #time this cpu hog
     
@@ -207,45 +209,37 @@ if __name__ == '__main__':
         
     try:
         #create decompile processes
-        #procs = []
-        #print_lock = Lock()
-        #for i in range(cpu_count()-1): #save one process for decompressing/decrypting
-        #    procs.append(Process(target=process_func,
-        #                         args=(code_queue, result_queue, store_path, print_lock)));
+        procs = []
+        print_lock = Lock()
+        for i in range(cpu_count()-1): #save one process for decompressing/decrypting
+            procs.append(Process(target=process_func,
+                                 args=(code_queue, result_queue, store_path, print_lock)));
             
         #start procs now; they will block on empty queue
-        #for p in procs:
-        #    p.start()
+        for p in procs:
+            p.start()
             
         with zipfile.ZipFile(os.path.join(eve_path, 'code.ccp'), 'r') as zf:
             for filename in zf.namelist():
-                print (filename)
                 if filename[-4:] == '.pyj':
                     code_queue.put( (filename[:-1], UnjumbleString(zf.read(filename))[8:]) )
                 elif filename[-4:] == '.pyc':
                     code_queue.put( (filename[:-1], zf.read(filename)[8:]) )
 
         #this process is done except for waiting, so add one more decompile process
-        #p = Process(target=process_func,
-        #            args=(code_queue, result_queue, store_path, print_lock))
-        #p.start()
-        #procs.append(p)
+        p = Process(target=process_func,
+                    args=(code_queue, result_queue, store_path, print_lock))
+        p.start()
+        procs.append(p)
         
         #add sentinel values to indicate end of queue
-        #for p in procs:
-        code_queue.put( (None, None) )
+        for p in procs:
+            code_queue.put( (None, None) )
 
         #wait for decompile processes to finish
-        #for p in procs:
-        #    p.join() #join() will block until p is finished
-        
-        #(code_q, result_q, store_path, lock):
-        #for job in iter(code_queue.get, None):
-        process_func(code_queue,result_queue,store_path)
-        
+        for p in procs:
+            p.join() #join() will block until p is finished
         #pull results from the result queue
-        
-        
         okay_files = failed_files = 0
         try:
             while 1: #will terminate when queue.get() generates Empty exception
@@ -259,4 +253,4 @@ if __name__ == '__main__':
         print '# elapsed time:', datetime.now() - startTime
     except:
         traceback.print_exc()
-        os._exit(0) #make Ctrl-C actually end process    
+        os._exit(0) #make Ctrl-C actually end process     
